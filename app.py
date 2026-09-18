@@ -60,10 +60,27 @@ def harmonize(frames):
     if not frames:return pd.DataFrame()
     df=pd.concat(frames,ignore_index=True,sort=False)
     dc=detect(df.columns,DATE_HINTS); tc=detect(df.columns,TIME_HINTS); mc=detect(df.columns,DOCTOR_HINTS)
-    df["__fecha"]=pd.to_datetime(df[dc],errors="coerce",dayfirst=True) if dc else pd.NaT
+    if dc:
+        raw_date=df[dc]
+        # Parse only likely date values; avoid dateutil scanning arbitrary clinical text.
+        if pd.api.types.is_numeric_dtype(raw_date):
+            df["__fecha"]=pd.to_datetime(raw_date,unit="D",origin="1899-12-30",errors="coerce")
+        else:
+            ds=raw_date.astype(str).str.strip()
+            ds=ds.where(ds.str.match(r"^(?:\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}|\\d{4}[/-]\\d{1,2}[/-]\\d{1,2})$",na=False))
+            df["__fecha"]=pd.to_datetime(ds,format="mixed",errors="coerce",dayfirst=True)
+    else:
+        df["__fecha"]=pd.NaT
     if tc:
-        t=pd.to_datetime(df[tc].astype(str),errors="coerce")
-        df["__hora"]=t.dt.strftime("%H:%M")
+        def safe_time(v):
+            if pd.isna(v): return None
+            if hasattr(v,"strftime"):
+                try: return v.strftime("%H:%M")
+                except Exception: pass
+            x=str(v).strip()
+            m=re.search(r"(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)",x)
+            return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+        df["__hora"]=df[tc].map(safe_time)
     else: df["__hora"]=None
     df["__medico"]=df[mc].astype(str) if mc else "No identificado"
     df["__dia"]=df["__fecha"].dt.strftime("%Y-%m-%d").fillna("Sin fecha")
