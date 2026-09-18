@@ -6,6 +6,7 @@ from dash import Dash, dcc, html, dash_table, Input, Output, State
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
+import numpy as np
 
 APP_TITLE="AVICO Lab 2.0"
 DATE_HINTS=["fecha","date","dia","ingreso","nacimiento","fn","2026"]
@@ -118,6 +119,17 @@ app.layout=html.Div([
    html.Div(id="audit")],className="panel"),
   html.Div([html.Div(id="kpis",className="kpi-grid"),dcc.Dropdown(id="sheet",placeholder="Todas las pestañas"),dcc.Dropdown(id="variable",placeholder="Selecciona una variable para analizar"),dcc.Graph(id="chart",config={"displayModeBar":False})],className="panel")
  ],className="page"),
+ dbc.Button("AI",id="ai-open",className="ai-fab",n_clicks=0),
+ dbc.Modal([
+  dbc.ModalHeader(dbc.ModalTitle("AVICO AI · Pregunta y cruce estadístico")),
+  dbc.ModalBody([
+   html.P("Pregunta en lenguaje natural o selecciona variables para explorar asociaciones."),
+   dcc.Textarea(id="ai-question",placeholder="Ej.: Cruza edad materna vs vía de nacimiento por mes y dime qué análisis estadístico conviene.",style={"width":"100%","height":"90px"}),
+   html.Br(),html.Br(),
+   dbc.Row([dbc.Col(dcc.Dropdown(id="ai-x",placeholder="Variable X"),6),dbc.Col(dcc.Dropdown(id="ai-y",placeholder="Variable Y"),6)]),
+   html.Br(),dbc.Button("Analizar",id="ai-run",n_clicks=0),html.Hr(),dcc.Loading(html.Div(id="ai-answer"))
+  ])
+ ],id="ai-modal",is_open=False,size="lg",scrollable=True),
  dcc.Store(id="store",storage_type="memory")
 ])
 
@@ -184,3 +196,52 @@ def show(data,var,sheet):
     return ks,fig
 
 if __name__=="__main__": app.run(debug=True,host="0.0.0.0",port=8050)
+
+@app.callback(Output("ai-modal","is_open"),Input("ai-open","n_clicks"),prevent_initial_call=True)
+def toggle_ai(n): return True
+
+@app.callback(Output("ai-x","options"),Output("ai-y","options"),Input("store","data"))
+def ai_options(data):
+    if not data:return [],[]
+    df=pd.read_json(io.StringIO(data),orient="split")
+    opts=[{"label":c,"value":c} for c in df.columns if not c.startswith("__")]
+    return opts,opts
+
+def variable_kind(x):
+    n=x.dropna()
+    if pd.api.types.is_numeric_dtype(n): return "numérica"
+    u=n.astype(str).nunique()
+    return "categórica" if u<=30 else "texto/alta cardinalidad"
+
+@app.callback(Output("ai-answer","children"),Input("ai-run","n_clicks"),State("store","data"),State("ai-question","value"),State("ai-x","value"),State("ai-y","value"),prevent_initial_call=True)
+def ai_analysis(n,data,q,x,y):
+    if not data:return dbc.Alert("Primero carga un libro Excel.",color="warning")
+    df=pd.read_json(io.StringIO(data),orient="split")
+    if not x and not y:
+        return html.Div([html.B("Pregunta recibida: "),q or "Sin pregunta",html.P("Selecciona Variable X y Variable Y para realizar un cruce reproducible sobre los datos cargados.")])
+    cards=[]
+    for v in [x,y]:
+        if v and v in df:
+            k=variable_kind(df[v]); valid=int(df[v].notna().sum()); missing=int(df[v].isna().sum())
+            cards.append(html.P([html.B(v),f": {k} · válidos {valid:,} · faltantes {missing:,}"]))
+    recommendation=""
+    result=""
+    if x and y and x in df and y in df:
+        kx,ky=variable_kind(df[x]),variable_kind(df[y])
+        d=df[[x,y]].dropna()
+        if kx=="numérica" and ky=="numérica":
+            recommendation="Sugerencia: correlación de Spearman como exploración robusta; Pearson si se cumplen linealidad y supuestos."
+            if len(d)>=3:
+                rho=d[x].rank().corr(d[y].rank()); result=f"Spearman exploratorio ρ = {rho:.3f} · n = {len(d):,}."
+        elif kx=="categórica" and ky=="categórica":
+            tab=pd.crosstab(d[x],d[y]); recommendation="Sugerencia: χ² de independencia; usar Fisher/exacto cuando las frecuencias esperadas sean pequeñas."
+            result=f"Tabla de contingencia: {tab.shape[0]} × {tab.shape[1]} categorías · n = {len(d):,}."
+        else:
+            num=x if kx=="numérica" else (y if ky=="numérica" else None)
+            cat=y if num==x else x
+            recommendation="Sugerencia: comparar distribución entre grupos; t/ANOVA si se justifican sus supuestos, o Mann–Whitney/Kruskal–Wallis como alternativas."
+            if num:
+                g=d.groupby(cat)[num].agg(["count","mean","median"]).head(20).round(2)
+                result="Resumen por grupos: "+ "; ".join(f"{idx}: n={int(r['count'])}, media={r['mean']}, mediana={r['median']}" for idx,r in g.iterrows())
+    return html.Div([html.Div(cards),html.P([html.B("Pregunta: "),q or "Cruce seleccionado"]),dbc.Alert(recommendation or "Selecciona dos variables para recomendar el análisis.",color="info"),html.P(result)])
+
