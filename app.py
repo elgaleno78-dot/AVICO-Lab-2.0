@@ -9,6 +9,7 @@ import plotly.express as px
 
 APP_TITLE="AVICO Lab 2.0"
 DATE_HINTS=["fecha","date","dia","ingreso","nacimiento","fn","2026"]
+CLEAN_SHEET="base_limpia_2026"
 TIME_HINTS=["hora","time"]
 DOCTOR_HINTS=["medico","médico","doctor","responsable","gineco","obstetra"]
 
@@ -48,12 +49,17 @@ def parse(contents,filename):
     book=pd.ExcelFile(io.BytesIO(raw),engine=engine)
     frames=[]; meta=[]
     month_names={"enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"}
-    for sheet in book.sheet_names:
+    sheets = book.sheet_names
+    # AVICO-clean exports already contain a canonical analytical table. Prefer it and ignore QC/support sheets.
+    canonical = [s for s in sheets if norm(s) == CLEAN_SHEET]
+    if canonical:
+        sheets = canonical
+    for sheet in sheets:
         try:
             df,h=read_sheet(raw,sheet,engine)
             if df.empty: continue
             df["__archivo"]=filename; df["__hoja"]=sheet; df["__fila_encabezado"]=h
-            df["__tipo_hoja"]="mensual" if norm(sheet) in month_names else ("resumen" if norm(sheet)=="resultados" else "auxiliar")
+            df["__tipo_hoja"]="base_limpia" if norm(sheet)==CLEAN_SHEET else ("mensual" if norm(sheet) in month_names else ("resumen" if norm(sheet)=="resultados" else "auxiliar"))
             # Known birth-book aliases: harmonize structural variants without losing originals.
             aliases={"2026":"fn","hora_24_h":"hora","hora____24_h":"hora","apgar__1_min":"apgar_1_min","apgar_1_min":"apgar_1_min",
                      "apgar_5_min":"apgar_5_min","folio_certificado":"folio_certificado","peso_g":"peso_g","talla_cm":"talla_cm",
@@ -127,6 +133,25 @@ def ingest(contents,names):
     if not frames:
         return None,html.Div(["No pude leer los archivos.",html.Pre("\n".join(errors))]),reports
     df=harmonize(frames)
+    # Canonical AVICO clean-base aliases: preserve all originals while ensuring timeline fields are populated.
+    if "fecha" in df.columns:
+        df["__fecha"]=pd.to_datetime(df["fecha"],errors="coerce",dayfirst=True)
+    if "hora" in df.columns:
+        def canon_time(v):
+            if pd.isna(v): return None
+            if hasattr(v,"strftime"):
+                try: return v.strftime("%H:%M")
+                except Exception: pass
+            x=str(v).strip()
+            m=re.search(r"(?<!\\d)([01]?\\d|2[0-3]):([0-5]\\d)(?!\\d)",x)
+            return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+        df["__hora"]=df["hora"].map(canon_time)
+    if "medico_valoracion" in df.columns:
+        df["__medico"]=df["medico_valoracion"].fillna("No identificado").astype(str)
+    if "turno" in df.columns:
+        df["__turno"]=df["turno"].fillna("Sin hora").astype(str).str.title()
+    df["__dia"]=df["__fecha"].dt.strftime("%Y-%m-%d").fillna("Sin fecha")
+    df["__mes"]=df["__fecha"].dt.strftime("%Y-%m").fillna("Sin fecha")
     # Avoid huge browser payloads: cap preview dataset in MVP.
     maxrows=25000
     clipped=df.head(maxrows)
