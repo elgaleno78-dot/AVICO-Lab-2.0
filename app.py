@@ -1,312 +1,132 @@
 from __future__ import annotations
-
-import base64
-import io
-import re
-import unicodedata
+import base64, io, re, unicodedata
 from collections import Counter
-from datetime import datetime
-
 import dash
 from dash import Dash, dcc, html, dash_table, Input, Output, State
 import dash_bootstrap_components as dbc
-import numpy as np
 import pandas as pd
 import plotly.express as px
 
+APP_TITLE="AVICO Lab 2.0"
+DATE_HINTS=["fecha","date","dia","ingreso","nacimiento"]
+TIME_HINTS=["hora","time"]
+DOCTOR_HINTS=["medico","médico","doctor","responsable","gineco","obstetra"]
 
-APP_TITLE = "AVICO Lab 2.0"
+def norm(v):
+    s="" if v is None else str(v)
+    return unicodedata.normalize("NFKD",s).encode("ascii","ignore").decode().strip().lower()
 
-DOCTORS = [
-    "HERNANDEZ ANDRADE YOVANI",
-    "HERNANDEZ CETINA IVAN KOWASKY",
-    "MACIAS GIL ALEJANDRA CELESTE",
-    "HUEZO CASILLAS VICENTE",
-    "JIMENEZ VALDEZ VICTORIA",
-    "CARDENAS NUÑEZ RAFAEL",
-]
+def clean_columns(df):
+    used=Counter(); cols=[]
+    for c in df.columns:
+        x=re.sub(r"[^a-z0-9_]+","",norm(c).replace(" ","_")) or "columna"
+        used[x]+=1; cols.append(x if used[x]==1 else f"{x}_{used[x]}")
+    df=df.copy(); df.columns=cols; return df
 
-DATE_HINTS = ["fecha", "date", "dia", "ingreso", "nacimiento"]
-TIME_HINTS = ["hora", "time"]
-DOCTOR_HINTS = ["medico", "médico", "doctor", "responsable", "gineco", "obstetra"]
-PATIENT_HINTS = ["paciente", "nombre", "expediente", "folio", "nss"]
+def header_score(row):
+    vals=[norm(x) for x in row if pd.notna(x)]
+    if not vals:return 0
+    keys=["fecha","hora","nombre","paciente","expediente","medico","diagnost","edad","turno","proced","cesarea","parto"]
+    return sum(any(k in v for k in keys) for v in vals)+min(len(set(vals)),12)*.05
 
+def read_sheet(raw, sheet, engine):
+    preview=pd.read_excel(io.BytesIO(raw),sheet_name=sheet,header=None,nrows=20,engine=engine)
+    scores=[header_score(preview.iloc[i].tolist()) for i in range(len(preview))]
+    h=int(max(range(len(scores)),key=lambda i:scores[i])) if scores else 0
+    df=pd.read_excel(io.BytesIO(raw),sheet_name=sheet,header=h,engine=engine)
+    df=df.dropna(how="all").dropna(axis=1,how="all")
+    return clean_columns(df),h+1
 
-def norm_text(value):
-    s = "" if value is None else str(value)
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"\s+", " ", s).strip().lower()
-    return s
+def detect(cols,hints):
+    for c in cols:
+        if any(norm(h) in norm(c) for h in hints): return c
+    return None
 
-
-def normalize_columns(df):
-    out = df.copy()
-    cols = []
-    used = Counter()
-    for col in out.columns:
-        c = norm_text(col).replace(" ", "_")
-        c = re.sub(r"[^a-z0-9_]+", "", c) or "columna"
-        used[c] += 1
-        if used[c] > 1:
-            c = f"{c}_{used[c]}"
-        cols.append(c)
-    out.columns = cols
-    return out
-
-
-def detect_column(columns, hints):
-    scored = []
-    for c in columns:
-        n = norm_text(c)
-        score = sum(1 for h in hints if norm_text(h) in n)
-        if score:
-            scored.append((score, c))
-    return sorted(scored, reverse=True)[0][1] if scored else None
-
-
-def parse_excel(contents, filename):
-    _, content_string = contents.split(",", 1)
-    decoded = base64.b64decode(content_string)
-    ext = filename.lower().rsplit(".", 1)[-1]
-    engine = "openpyxl" if ext == "xlsx" else "xlrd"
-    sheets = pd.read_excel(io.BytesIO(decoded), sheet_name=None, engine=engine)
-    frames = []
-    for sheet, df in sheets.items():
-        if df is None or df.empty:
-            continue
-        df = normalize_columns(df)
-        df["__archivo"] = filename
-        df["__hoja"] = sheet
-        frames.append(df)
-    return frames
-
+def parse(contents,filename):
+    raw=base64.b64decode(contents.split(",",1)[1])
+    engine="openpyxl" if filename.lower().endswith(".xlsx") else "xlrd"
+    book=pd.ExcelFile(io.BytesIO(raw),engine=engine)
+    frames=[]; meta=[]
+    for sheet in book.sheet_names:
+        try:
+            df,h=read_sheet(raw,sheet,engine)
+            if df.empty: continue
+            df["__archivo"]=filename; df["__hoja"]=sheet; df["__fila_encabezado"]=h
+            frames.append(df); meta.append((sheet,len(df),len(df.columns),h))
+        except Exception as e: meta.append((sheet,0,0,f"ERROR: {e}"))
+    return frames,meta
 
 def harmonize(frames):
-    if not frames:
-        return pd.DataFrame()
-    df = pd.concat(frames, ignore_index=True, sort=False)
-    date_col = detect_column(df.columns, DATE_HINTS)
-    time_col = detect_column(df.columns, TIME_HINTS)
-    doctor_col = detect_column(df.columns, DOCTOR_HINTS)
-
-    if date_col:
-        df["__fecha"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
-    else:
-        df["__fecha"] = pd.NaT
-
-    if time_col:
-        def parse_time(x):
-            if pd.isna(x):
-                return None
-            if isinstance(x, datetime):
-                return x.time().strftime("%H:%M")
-            s = str(x).strip()
-            m = re.search(r"(\d{1,2}):(\d{2})", s)
-            return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
-        df["__hora"] = df[time_col].map(parse_time)
-    else:
-        df["__hora"] = None
-
-    if doctor_col:
-        df["__medico_original"] = df[doctor_col].astype(str)
-        def match_doc(v):
-            nv = norm_text(v)
-            scores = []
-            for d in DOCTORS:
-                toks = [t for t in norm_text(d).split() if len(t) > 3]
-                score = sum(t in nv for t in toks)
-                scores.append((score, d))
-            best = max(scores)
-            return best[1] if best[0] >= 1 else str(v)
-        df["__medico"] = df[doctor_col].map(match_doc)
-    else:
-        df["__medico"] = "No identificado"
-
-    if "__fecha" in df and df["__fecha"].notna().any():
-        df["__mes"] = df["__fecha"].dt.to_period("M").astype(str)
-        df["__dia"] = df["__fecha"].dt.date.astype(str)
-        df["__hora_num"] = df["__hora"].str.slice(0, 2)
-        df["__hora_num"] = pd.to_numeric(df["__hora_num"], errors="coerce")
-        df["__turno"] = np.select(
-            [
-                (df["__hora_num"] >= 7) & (df["__hora_num"] <= 14),
-                (df["__hora_num"] >= 15) & (df["__hora_num"] <= 21),
-            ],
-            ["Matutino", "Vespertino"],
-            default="Nocturno",
-        )
-    else:
-        df["__mes"] = "Sin fecha"
-        df["__dia"] = "Sin fecha"
-        df["__turno"] = "Sin turno"
+    if not frames:return pd.DataFrame()
+    df=pd.concat(frames,ignore_index=True,sort=False)
+    dc=detect(df.columns,DATE_HINTS); tc=detect(df.columns,TIME_HINTS); mc=detect(df.columns,DOCTOR_HINTS)
+    df["__fecha"]=pd.to_datetime(df[dc],errors="coerce",dayfirst=True) if dc else pd.NaT
+    if tc:
+        t=pd.to_datetime(df[tc].astype(str),errors="coerce")
+        df["__hora"]=t.dt.strftime("%H:%M")
+    else: df["__hora"]=None
+    df["__medico"]=df[mc].astype(str) if mc else "No identificado"
+    df["__dia"]=df["__fecha"].dt.strftime("%Y-%m-%d").fillna("Sin fecha")
+    df["__mes"]=df["__fecha"].dt.strftime("%Y-%m").fillna("Sin fecha")
+    hh=pd.to_numeric(pd.Series(df["__hora"]).str[:2],errors="coerce")
+    df["__turno"]="Sin hora"
+    df.loc[(hh>=7)&(hh<=14),"__turno"]="Matutino"
+    df.loc[(hh>=15)&(hh<=21),"__turno"]="Vespertino"
+    df.loc[(hh>=22)|(hh<7),"__turno"]="Nocturno"
     return df
 
+app=Dash(__name__,external_stylesheets=[dbc.themes.BOOTSTRAP],title=APP_TITLE)
+server=app.server
+app.layout=html.Div([
+ html.Div([html.Div([html.Div("AVICO",className="brand"),html.Div("Lab 2.0",className="brand-sub")]),html.Div("Laboratorio viviente retrospectivo",className="tagline")],className="topbar"),
+ html.Div([
+  html.Div([html.H2("Ingesta de datos"),html.P("Sube uno o varios Excel. El sistema inspecciona hojas y busca automáticamente la fila real de encabezados."),
+   dcc.Upload(id="up",children=html.Div([html.Div("Seleccionar archivos Excel",className="upload-title"),html.Div(".xlsx / .xls · admite múltiples archivos",className="upload-sub")]),multiple=True,className="upload-box"),
+   dcc.Loading(html.Div(id="status",className="status-card"),type="circle"),
+   html.Div(id="audit")],className="panel"),
+  html.Div([html.Div(id="kpis",className="kpi-grid"),dcc.Dropdown(id="variable",placeholder="Selecciona una variable para analizar"),dcc.Graph(id="chart",config={"displayModeBar":False})],className="panel")
+ ],className="page"),
+ dcc.Store(id="store",storage_type="memory")
+])
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], title=APP_TITLE)
-server = app.server
-
-STORE = dcc.Store(id="data-store", storage_type="memory")
-
-header = html.Div(
-    [
-        html.Div([
-            html.Div("AVICO", className="brand"),
-            html.Div("Lab 2.0", className="brand-sub"),
-        ]),
-        html.Div("Laboratorio viviente retrospectivo", className="tagline"),
-    ],
-    className="topbar",
-)
-
-upload = dcc.Upload(
-    id="upload-data",
-    children=html.Div([
-        html.Div("Arrastra aquí los archivos Excel", className="upload-title"),
-        html.Div("o haz clic para seleccionar múltiples archivos .xlsx / .xls", className="upload-sub"),
-    ]),
-    multiple=True,
-    className="upload-box",
-)
-
-app.layout = html.Div([
-    STORE,
-    header,
-    html.Div([
-        dbc.Row([
-            dbc.Col(html.Div([
-                html.H2("Ingesta masiva"),
-                html.P("Carga los archivos del periodo. AVICO Lab 2.0 los integra en una sola memoria retrospectiva."),
-                upload,
-                html.Div(id="upload-status", className="status-card"),
-            ], className="panel"), md=4),
-            dbc.Col(html.Div([
-                html.Div(id="kpis", className="kpi-grid"),
-                dbc.Row([
-                    dbc.Col(dcc.Dropdown(id="filter-month", placeholder="Mes", clearable=True), md=4),
-                    dbc.Col(dcc.Dropdown(id="filter-shift", placeholder="Turno", clearable=True), md=4),
-                    dbc.Col(dcc.Dropdown(id="filter-doctor", placeholder="Médico", clearable=True), md=4),
-                ], className="filters"),
-                dcc.Graph(id="timeline", config={"displayModeBar": False}),
-            ], className="panel"), md=8),
-        ], className="g-3"),
-        dbc.Row([
-            dbc.Col(html.Div([
-                html.H3("Servicio viviente"),
-                dcc.Graph(id="shift-chart", config={"displayModeBar": False}),
-            ], className="panel"), md=6),
-            dbc.Col(html.Div([
-                html.H3("Participación por médico"),
-                dcc.Graph(id="doctor-chart", config={"displayModeBar": False}),
-            ], className="panel"), md=6),
-        ], className="g-3 mt-1"),
-        html.Div([
-            html.H3("Explorador retrospectivo"),
-            html.P("Filtra el histórico y revisa los registros que sustentan cada resultado."),
-            dash_table.DataTable(
-                id="data-table",
-                page_size=15,
-                filter_action="native",
-                sort_action="native",
-                style_table={"overflowX": "auto"},
-                style_cell={"fontFamily": "Arial", "fontSize": 12, "padding": "8px", "maxWidth": 220, "whiteSpace": "normal"},
-                style_header={"fontWeight": "700"},
-            ),
-        ], className="panel mt-3"),
-    ], className="page"),
-], className="app-shell")
-
-
-@app.callback(
-    Output("data-store", "data"),
-    Output("upload-status", "children"),
-    Input("upload-data", "contents"),
-    State("upload-data", "filename"),
-    prevent_initial_call=True,
-)
-def ingest(contents_list, filenames):
-    if not contents_list:
-        return dash.no_update, ""
-    frames, errors = [], []
-    for contents, filename in zip(contents_list, filenames):
+@app.callback(Output("store","data"),Output("status","children"),Output("audit","children"),Input("up","contents"),State("up","filename"),prevent_initial_call=True)
+def ingest(contents,names):
+    if not contents:return dash.no_update,"No se recibieron archivos.",""
+    frames=[]; reports=[]; errors=[]
+    for c,n in zip(contents,names):
         try:
-            frames.extend(parse_excel(contents, filename))
-        except Exception as e:
-            errors.append(f"{filename}: {e}")
-    df = harmonize(frames)
-    payload = df.to_json(date_format="iso", orient="split")
-    msg = html.Div([
-        html.B(f"{len(filenames)} archivos recibidos · {len(df):,} registros integrados"),
-        html.Div(f"{len(errors)} archivos con error" if errors else "Carga completada sin errores"),
-        html.Details([html.Summary("Ver errores"), html.Pre("\n".join(errors))]) if errors else None,
-    ])
-    return payload, msg
+            fs,meta=parse(c,n); frames+=fs
+            reports.append(html.Div([html.B(n),html.Ul([html.Li(f"Hoja {s}: {r:,} filas · {co} columnas · encabezado fila {h}") for s,r,co,h in meta])]))
+        except Exception as e: errors.append(f"{n}: {type(e).__name__}: {e}")
+    if not frames:
+        return None,html.Div(["No pude leer los archivos.",html.Pre("\n".join(errors))]),reports
+    df=harmonize(frames)
+    # Avoid huge browser payloads: cap preview dataset in MVP.
+    maxrows=25000
+    clipped=df.head(maxrows)
+    payload=clipped.to_json(date_format="iso",orient="split")
+    status=html.Div([html.B(f"✓ {len(names)} archivo(s) leído(s) · {len(df):,} registros · {len(df.columns)} variables"),html.Div(f"Vista activa: {len(clipped):,} registros" + (" (límite temporal del MVP)" if len(df)>maxrows else "")),html.Pre("\n".join(errors)) if errors else None])
+    return payload,status,reports
 
+@app.callback(Output("variable","options"),Input("store","data"))
+def vars(data):
+    if not data:return []
+    df=pd.read_json(io.StringIO(data),orient="split")
+    return [{"label":c,"value":c} for c in df.columns if not c.startswith("__")]
 
-@app.callback(
-    Output("filter-month", "options"),
-    Output("filter-shift", "options"),
-    Output("filter-doctor", "options"),
-    Input("data-store", "data"),
-)
-def set_filters(data):
-    if not data:
-        return [], [], []
-    df = pd.read_json(io.StringIO(data), orient="split")
-    opts = lambda vals: [{"label": str(v), "value": str(v)} for v in sorted(pd.Series(vals).dropna().astype(str).unique())]
-    return opts(df["__mes"]), opts(df["__turno"]), opts(df["__medico"])
+@app.callback(Output("kpis","children"),Output("chart","figure"),Input("store","data"),Input("variable","value"))
+def show(data,var):
+    empty=px.scatter(title="Carga un Excel para comenzar")
+    if not data:return [],empty
+    df=pd.read_json(io.StringIO(data),orient="split")
+    ks=[html.Div([html.Span("Registros"),html.B(f"{len(df):,}")],className="kpi"),html.Div([html.Span("Variables"),html.B(str(sum(not c.startswith("__") for c in df.columns)))],className="kpi"),html.Div([html.Span("Archivos"),html.B(str(df["__archivo"].nunique()))],className="kpi"),html.Div([html.Span("Hojas"),html.B(str(df["__hoja"].nunique()))],className="kpi")]
+    if not var:
+        g=df.groupby("__dia").size().reset_index(name="registros"); fig=px.bar(g,x="__dia",y="registros",title="Registros por fecha detectada")
+    elif pd.api.types.is_numeric_dtype(df[var]):
+        fig=px.histogram(df,x=var,title=f"Distribución: {var}")
+    else:
+        g=df[var].astype(str).value_counts().head(30).reset_index(); g.columns=[var,"frecuencia"]; fig=px.bar(g,x=var,y="frecuencia",title=f"Frecuencia: {var}")
+    fig.update_layout(margin=dict(l=20,r=20,t=55,b=30))
+    return ks,fig
 
-
-@app.callback(
-    Output("kpis", "children"),
-    Output("timeline", "figure"),
-    Output("shift-chart", "figure"),
-    Output("doctor-chart", "figure"),
-    Output("data-table", "data"),
-    Output("data-table", "columns"),
-    Input("data-store", "data"),
-    Input("filter-month", "value"),
-    Input("filter-shift", "value"),
-    Input("filter-doctor", "value"),
-)
-def render(data, month, shift, doctor):
-    empty = px.line(title="Carga archivos Excel para iniciar el laboratorio retrospectivo.")
-    if not data:
-        return [], empty, empty, empty, [], []
-    df = pd.read_json(io.StringIO(data), orient="split")
-    f = df.copy()
-    if month:
-        f = f[f["__mes"].astype(str) == month]
-    if shift:
-        f = f[f["__turno"].astype(str) == shift]
-    if doctor:
-        f = f[f["__medico"].astype(str) == doctor]
-
-    kpis = [
-        html.Div([html.Span("Registros"), html.B(f"{len(f):,}")], className="kpi"),
-        html.Div([html.Span("Archivos"), html.B(str(f["__archivo"].nunique()))], className="kpi"),
-        html.Div([html.Span("Días"), html.B(str(f["__dia"].nunique()))], className="kpi"),
-        html.Div([html.Span("Médicos detectados"), html.B(str(f["__medico"].nunique()))], className="kpi"),
-    ]
-
-    daily = f.groupby("__dia", dropna=False).size().reset_index(name="registros")
-    fig_t = px.line(daily, x="__dia", y="registros", markers=True, title="Actividad retrospectiva por día")
-    fig_t.update_layout(margin=dict(l=20,r=20,t=50,b=20), xaxis_title="", yaxis_title="Registros")
-
-    shifts = f.groupby("__turno").size().reset_index(name="registros")
-    fig_s = px.bar(shifts, x="__turno", y="registros")
-    fig_s.update_layout(margin=dict(l=20,r=20,t=20,b=20), xaxis_title="", yaxis_title="Registros")
-
-    docs = f.groupby("__medico").size().reset_index(name="registros").sort_values("registros", ascending=True).tail(15)
-    fig_d = px.bar(docs, x="registros", y="__medico", orientation="h")
-    fig_d.update_layout(margin=dict(l=20,r=20,t=20,b=20), xaxis_title="Registros", yaxis_title="")
-
-    visible = [c for c in f.columns if not c.startswith("__")] + ["__archivo","__hoja","__dia","__hora","__turno","__medico"]
-    visible = [c for c in visible if c in f.columns][:30]
-    table_df = f[visible].copy().head(2000)
-    table_df = table_df.where(pd.notnull(table_df), None)
-    cols = [{"name": c, "id": c} for c in visible]
-    return kpis, fig_t, fig_s, fig_d, table_df.to_dict("records"), cols
-
-
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=8050)
+if __name__=="__main__": app.run(debug=True,host="0.0.0.0",port=8050)
