@@ -31,3 +31,5 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Segoe UI,A
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
   .topbar{align-items:start;gap:14px;flex-direction:column}
 }
+
+.ai-fab{position:fixed;right:24px;bottom:24px;z-index:1050;border-radius:999px!important;width:64px;height:64px;font-weight:800!important;font-size:18px!important;background:#0b5260!important;border:none!important;box-shadow:0 8px 24px rgba(0,0,0,.22)}
