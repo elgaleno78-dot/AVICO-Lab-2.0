@@ -8,7 +8,7 @@ import pandas as pd
 import plotly.express as px
 
 APP_TITLE="AVICO Lab 2.0"
-DATE_HINTS=["fecha","date","dia","ingreso","nacimiento"]
+DATE_HINTS=["fecha","date","dia","ingreso","nacimiento","fn","2026"]
 TIME_HINTS=["hora","time"]
 DOCTOR_HINTS=["medico","médico","doctor","responsable","gineco","obstetra"]
 
@@ -47,11 +47,19 @@ def parse(contents,filename):
     engine="openpyxl" if filename.lower().endswith(".xlsx") else "xlrd"
     book=pd.ExcelFile(io.BytesIO(raw),engine=engine)
     frames=[]; meta=[]
+    month_names={"enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"}
     for sheet in book.sheet_names:
         try:
             df,h=read_sheet(raw,sheet,engine)
             if df.empty: continue
             df["__archivo"]=filename; df["__hoja"]=sheet; df["__fila_encabezado"]=h
+            df["__tipo_hoja"]="mensual" if norm(sheet) in month_names else ("resumen" if norm(sheet)=="resultados" else "auxiliar")
+            # Known birth-book aliases: harmonize structural variants without losing originals.
+            aliases={"2026":"fn","hora_24_h":"hora","hora____24_h":"hora","apgar__1_min":"apgar_1_min","apgar_1_min":"apgar_1_min",
+                     "apgar_5_min":"apgar_5_min","folio_certificado":"folio_certificado","peso_g":"peso_g","talla_cm":"talla_cm",
+                     "pc_cm":"pc_cm","capurro_sdg":"capurro_sdg"}
+            ren={c:aliases[c] for c in df.columns if c in aliases and aliases[c] not in df.columns}
+            if ren: df=df.rename(columns=ren)
             frames.append(df); meta.append((sheet,len(df),len(df.columns),h))
         except Exception as e: meta.append((sheet,0,0,f"ERROR: {e}"))
     return frames,meta
@@ -59,6 +67,7 @@ def parse(contents,filename):
 def harmonize(frames):
     if not frames:return pd.DataFrame()
     df=pd.concat(frames,ignore_index=True,sort=False)
+    # Prefer patient-level sheets for clinical timeline; summaries remain loaded and traceable.
     dc=detect(df.columns,DATE_HINTS); tc=detect(df.columns,TIME_HINTS); mc=detect(df.columns,DOCTOR_HINTS)
     if dc:
         raw_date=df[dc]
@@ -101,7 +110,7 @@ app.layout=html.Div([
    dcc.Upload(id="up",children=html.Div([html.Div("Seleccionar archivos Excel",className="upload-title"),html.Div(".xlsx / .xls · admite múltiples archivos",className="upload-sub")]),multiple=True,className="upload-box"),
    dcc.Loading(html.Div(id="status",className="status-card"),type="circle"),
    html.Div(id="audit")],className="panel"),
-  html.Div([html.Div(id="kpis",className="kpi-grid"),dcc.Dropdown(id="variable",placeholder="Selecciona una variable para analizar"),dcc.Graph(id="chart",config={"displayModeBar":False})],className="panel")
+  html.Div([html.Div(id="kpis",className="kpi-grid"),dcc.Dropdown(id="sheet",placeholder="Todas las pestañas"),dcc.Dropdown(id="variable",placeholder="Selecciona una variable para analizar"),dcc.Graph(id="chart",config={"displayModeBar":False})],className="panel")
  ],className="page"),
  dcc.Store(id="store",storage_type="memory")
 ])
@@ -125,17 +134,20 @@ def ingest(contents,names):
     status=html.Div([html.B(f"✓ {len(names)} archivo(s) leído(s) · {len(df):,} registros · {len(df.columns)} variables"),html.Div(f"Vista activa: {len(clipped):,} registros" + (" (límite temporal del MVP)" if len(df)>maxrows else "")),html.Pre("\n".join(errors)) if errors else None])
     return payload,status,reports
 
-@app.callback(Output("variable","options"),Input("store","data"))
+@app.callback(Output("variable","options"),Output("sheet","options"),Input("store","data"))
 def vars(data):
-    if not data:return []
+    if not data:return [],[]
     df=pd.read_json(io.StringIO(data),orient="split")
-    return [{"label":c,"value":c} for c in df.columns if not c.startswith("__")]
+    vo=[{"label":c,"value":c} for c in df.columns if not c.startswith("__")]
+    so=[{"label":s,"value":s} for s in sorted(df["__hoja"].dropna().astype(str).unique())]
+    return vo,so
 
-@app.callback(Output("kpis","children"),Output("chart","figure"),Input("store","data"),Input("variable","value"))
-def show(data,var):
+@app.callback(Output("kpis","children"),Output("chart","figure"),Input("store","data"),Input("variable","value"),Input("sheet","value"))
+def show(data,var,sheet):
     empty=px.scatter(title="Carga un Excel para comenzar")
     if not data:return [],empty
     df=pd.read_json(io.StringIO(data),orient="split")
+    if sheet: df=df[df["__hoja"]==sheet]
     ks=[html.Div([html.Span("Registros"),html.B(f"{len(df):,}")],className="kpi"),html.Div([html.Span("Variables"),html.B(str(sum(not c.startswith("__") for c in df.columns)))],className="kpi"),html.Div([html.Span("Archivos"),html.B(str(df["__archivo"].nunique()))],className="kpi"),html.Div([html.Span("Hojas"),html.B(str(df["__hoja"].nunique()))],className="kpi")]
     if not var:
         g=df.groupby("__dia").size().reset_index(name="registros"); fig=px.bar(g,x="__dia",y="registros",title="Registros por fecha detectada")
