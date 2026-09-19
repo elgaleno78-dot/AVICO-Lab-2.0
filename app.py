@@ -44,11 +44,28 @@ def detect(cols,hints):
         if any(norm(h) in norm(c) for h in hints): return c
     return None
 
+def extract_form_sheet(raw, sheet):
+    grid=pd.read_excel(io.BytesIO(raw),sheet_name=sheet,header=None,dtype=object,engine="openpyxl")
+    out={}
+    for row in grid.values.tolist():
+        for c,val in enumerate(row):
+            if not isinstance(val,str): continue
+            label=norm(val).strip(" :")
+            if not label or len(label)>55: continue
+            for j in range(c+1,min(c+4,len(row))):
+                v=row[j]
+                if pd.notna(v) and str(v).strip() and norm(v)!=label:
+                    key=re.sub(r"[^a-z0-9_]+","_",label.replace(" ","_")).strip("_")
+                    if key and key not in out: out[key]=v
+                    break
+    out["__hoja"]=sheet
+    return out
+
 def parse(contents,filename):
     raw=base64.b64decode(contents.split(",",1)[1])
     engine="openpyxl" if filename.lower().endswith(".xlsx") else "xlrd"
     book=pd.ExcelFile(io.BytesIO(raw),engine=engine)
-    frames=[]; meta=[]
+    frames=[]; meta=[]; form_records=[]
     month_names={"enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"}
     sheets = book.sheet_names
     # AVICO-clean exports already contain a canonical analytical table. Prefer it and ignore QC/support sheets.
@@ -57,6 +74,11 @@ def parse(contents,filename):
         sheets = canonical
     for sheet in sheets:
         try:
+            if engine=="openpyxl" and norm(sheet) in {"historia clinica","indicaciones","nota de egreso"}:
+                rec=extract_form_sheet(raw,sheet)
+                rec["__archivo"]=filename; rec["__tipo_hoja"]="formulario"
+                form_records.append(rec); meta.append((sheet,1,len(rec),1))
+                continue
             df,h=read_sheet(raw,sheet,engine)
             if df.empty: continue
             df["__archivo"]=filename; df["__hoja"]=sheet; df["__fila_encabezado"]=h
@@ -69,6 +91,13 @@ def parse(contents,filename):
             if ren: df=df.rename(columns=ren)
             frames.append(df); meta.append((sheet,len(df),len(df.columns),h))
         except Exception as e: meta.append((sheet,0,0,f"ERROR: {e}"))
+    if form_records:
+        merged={"__archivo":filename,"__tipo_hoja":"formulario_clinico","__hoja":" + ".join([r["__hoja"] for r in form_records])}
+        for rec in form_records:
+            prefix=re.sub(r"[^a-z0-9]+","_",norm(rec["__hoja"])).strip("_")
+            for k,v in rec.items():
+                if not k.startswith("__"): merged[f"{prefix}__{k}"]=v
+        frames.append(pd.DataFrame([merged]))
     return frames,meta
 
 def harmonize(frames):
@@ -114,7 +143,7 @@ app.layout=html.Div([
  html.Div([html.Div([html.Div("AVICO",className="brand"),html.Div("Lab 2.0",className="brand-sub")]),html.Div("Laboratorio viviente retrospectivo",className="tagline")],className="topbar"),
  html.Div([
   html.Div([html.H2("Ingesta de datos"),html.P("Sube uno o varios Excel. El sistema inspecciona hojas y busca automáticamente la fila real de encabezados."),
-   dcc.Upload(id="up",children=html.Div([html.Div("Seleccionar archivos Excel",className="upload-title"),html.Div(".xlsx / .xls · admite múltiples archivos",className="upload-sub")]),multiple=True,className="upload-box"),
+   dcc.Upload(id="up",children=html.Div([html.Div("Seleccionar archivos Excel",className="upload-title"),html.Div(".xlsx / .xls · carga masiva: 250+ archivos",className="upload-sub")]),multiple=True,accept=".xlsx,.xls",className="upload-box"),
    dcc.Loading(html.Div(id="status",className="status-card"),type="circle"),
    html.Div(id="audit")],className="panel"),
   html.Div([html.Div(id="kpis",className="kpi-grid"),dcc.Dropdown(id="sheet",placeholder="Todas las pestañas"),dcc.Dropdown(id="variable",placeholder="Selecciona una variable para analizar"),dcc.Graph(id="chart",config={"displayModeBar":False})],className="panel")
