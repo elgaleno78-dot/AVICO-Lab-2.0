@@ -1,11 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<widget id="mx.com.avicosalud.mobile" version="0.1.0" xmlns="http://www.w3.org/ns/widgets">
+<widget id="mx.com.avicosalud.mobile" version="0.1.0" ios-CFBundleVersion="1" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
   <name>AVICO Salud</name>
-  <description>Portal educativo y científico AVICO Salud</description>
+  <description>Educación, investigación y herramientas de salud</description>
   <author>AVICO Salud</author>
   <content src="index.html"/>
   <access origin="https://avico-salud-ecosistema.onrender.com"/>
   <allow-navigation href="https://avico-salud-ecosistema.onrender.com/*"/>
+  <allow-intent href="https://*/*"/>
   <preference name="Orientation" value="portrait"/>
-  <preference name="AndroidXEnabled" value="true"/>
+  <preference name="DisallowOverscroll" value="true"/>
+  <preference name="WKWebViewOnly" value="true"/>
+  <platform name="ios">
+    <preference name="deployment-target" value="15.0"/>
+    <preference name="SwiftVersion" value="5.0"/>
+    <preference name="scheme" value="app"/>
+  </platform>
+  <platform name="android">
+    <preference name="AndroidXEnabled" value="true"/>
+  </platform>
 </widget>
