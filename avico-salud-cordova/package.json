@@ -1,0 +1,16 @@
+{
+  "name": "avico-salud-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contenedor Cordova para AVICO Salud",
+  "scripts": {
+    "prepare:www": "node scripts/prepare-www.js",
+    "android": "npm run prepare:www && cordova platform add android && cordova build android",
+    "ios": "npm run prepare:www && cordova platform add ios && cordova build ios"
+  },
+  "devDependencies": {
+    "cordova": "^12.0.0",
+    "cordova-android": "^13.0.0",
+    "cordova-ios": "^7.1.1"
+  }
+}
