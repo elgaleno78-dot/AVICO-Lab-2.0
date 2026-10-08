@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<widget id="mx.com.avicosalud.mobile" version="0.1.0" xmlns="http://www.w3.org/ns/widgets">
+  <name>AVICO Salud</name>
+  <description>Portal educativo y científico AVICO Salud</description>
+  <author>AVICO Salud</author>
+  <content src="index.html"/>
+  <access origin="https://avico-salud-ecosistema.onrender.com"/>
+  <allow-navigation href="https://avico-salud-ecosistema.onrender.com/*"/>
+  <preference name="Orientation" value="portrait"/>
+  <preference name="AndroidXEnabled" value="true"/>
+</widget>
